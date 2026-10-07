@@ -45,7 +45,7 @@ export class PetWindowManager {
         preload: path.join(__dirname, '../preload/pet-preload.cjs'),
         nodeIntegration: false,
         contextIsolation: true,
-        backgroundThrottling: false
+        backgroundThrottling: true
       }
     });
 

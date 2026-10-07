@@ -5,7 +5,6 @@ import {
   ToolStatus,
   CustomToolConfig
 } from '../shared/types';
-import { TOOL_REGISTRY } from '../shared/constants';
 import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
@@ -59,22 +58,270 @@ export abstract class BaseToolAdapter {
   }
 }
 
-// Utility: Check if a process name is running in macOS / Linux or Windows
-export function checkProcessRunning(processNames: string[]): Promise<boolean> {
-  return new Promise(resolve => {
-    const isWin = process.platform === 'win32';
-    const cmd = isWin ? 'tasklist' : 'ps -e -o comm=';
+// Low-CPU Cached Process Checker (prevents continuous subshell spawning)
+class ProcessMonitorCache {
+  private static cachedOutput: string = '';
+  private static lastCheckTime: number = 0;
+  private static isChecking: boolean = false;
+  private static cacheDurationMs: number = 20000; // 20s cache to keep Mac cool
 
-    exec(cmd, { timeout: 3000 }, (error, stdout) => {
-      if (error || !stdout) {
-        resolve(false);
-        return;
-      }
-      const lowerOut = stdout.toLowerCase();
-      const found = processNames.some(name => lowerOut.includes(name.toLowerCase()));
-      resolve(found);
+  public static async isProcessRunning(names: string[]): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.lastCheckTime > this.cacheDurationMs && !this.isChecking) {
+      await this.refreshProcessList();
+    }
+    const lower = this.cachedOutput.toLowerCase();
+    return names.some(n => lower.includes(n.toLowerCase()));
+  }
+
+  private static refreshProcessList(): Promise<void> {
+    return new Promise(resolve => {
+      this.isChecking = true;
+      const isWin = process.platform === 'win32';
+      const cmd = isWin ? 'tasklist' : 'ps -e -o comm=';
+
+      exec(cmd, { timeout: 4000 }, (err, stdout) => {
+        this.isChecking = false;
+        this.lastCheckTime = Date.now();
+        if (!err && stdout) {
+          this.cachedOutput = stdout;
+        }
+        resolve();
+      });
     });
-  });
+  }
+}
+
+// Real-Time Antigravity Agent & IDE Adapter
+export class AntigravityAdapter extends BaseToolAdapter {
+  public readonly id = 'antigravity';
+  public readonly name = 'Antigravity';
+  public readonly category = 'ide' as const;
+
+  private activeTranscriptPath: string | null = null;
+  private fileWatcher: fs.FSWatcher | null = null;
+  private brainWatcher: fs.FSWatcher | null = null;
+  private lastFileOffset: number = 0;
+  private sessionScanInterval?: NodeJS.Timeout;
+  private workspaceWatcher: fs.FSWatcher | null = null;
+
+  public async isAvailable(): Promise<boolean> {
+    const home = os.homedir();
+    const agyConfig = path.join(home, '.gemini/antigravity-ide');
+    return fs.existsSync(agyConfig) || (await ProcessMonitorCache.isProcessRunning(['Antigravity', 'antigravity', 'agy']));
+  }
+
+  public async start(): Promise<void> {
+    this.isRunning = true;
+    this.findAndWatchActiveTranscript();
+
+    // Re-check for new conversation every 30 seconds
+    this.sessionScanInterval = setInterval(() => {
+      this.findAndWatchActiveTranscript();
+    }, 30000);
+
+    // Also watch current workspace directory for live file edits
+    this.watchWorkspaceFiles();
+  }
+
+  private findAndWatchActiveTranscript() {
+    const home = os.homedir();
+    const brainDir = path.join(home, '.gemini/antigravity-ide/brain');
+    if (!fs.existsSync(brainDir)) return;
+
+    try {
+      const entries = fs.readdirSync(brainDir, { withFileTypes: true })
+        .filter(d => d.isDirectory() && d.name !== 'tempmediaStorage')
+        .map(d => {
+          const logPath = path.join(brainDir, d.name, '.system_generated/logs/transcript.jsonl');
+          const hasLog = fs.existsSync(logPath);
+          const mtime = hasLog ? fs.statSync(logPath).mtimeMs : 0;
+          return { logPath, hasLog, mtime };
+        })
+        .filter(e => e.hasLog)
+        .sort((a, b) => b.mtime - a.mtime);
+
+      if (entries.length > 0) {
+        const latestLog = entries[0].logPath;
+        if (latestLog !== this.activeTranscriptPath) {
+          this.attachTranscriptWatcher(latestLog);
+        }
+      }
+    } catch (err) {
+      console.warn('Antigravity session scan error:', err);
+    }
+  }
+
+  private attachTranscriptWatcher(logPath: string) {
+    if (this.fileWatcher) {
+      this.fileWatcher.close();
+      this.fileWatcher = null;
+    }
+
+    this.activeTranscriptPath = logPath;
+    try {
+      // Start reading from current end of file
+      const stats = fs.statSync(logPath);
+      this.lastFileOffset = stats.size;
+
+      // Event-driven zero-CPU file watcher via kernel FSEvents
+      this.fileWatcher = fs.watch(logPath, (eventType) => {
+        if (eventType === 'change') {
+          this.readNewTranscriptLines();
+        }
+      });
+    } catch (err) {
+      console.warn('Failed to watch transcript:', err);
+    }
+  }
+
+  private readNewTranscriptLines() {
+    if (!this.activeTranscriptPath || !fs.existsSync(this.activeTranscriptPath)) return;
+
+    try {
+      const stats = fs.statSync(this.activeTranscriptPath);
+      if (stats.size < this.lastFileOffset) {
+        // File truncated/restarted
+        this.lastFileOffset = 0;
+      }
+      if (stats.size === this.lastFileOffset) return;
+
+      const stream = fs.createReadStream(this.activeTranscriptPath, {
+        start: this.lastFileOffset,
+        end: stats.size
+      });
+
+      this.lastFileOffset = stats.size;
+      let buffer = '';
+
+      stream.on('data', chunk => {
+        buffer += chunk.toString();
+      });
+
+      stream.on('end', () => {
+        const lines = buffer.split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const entry = JSON.parse(line);
+            this.handleTranscriptEntry(entry);
+          } catch (e) {
+            // Partial line
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('Error reading transcript stream:', err);
+    }
+  }
+
+  private handleTranscriptEntry(entry: any) {
+    // 1. User prompt submitted
+    if (entry.type === 'USER_INPUT') {
+      this.emit('PROMPT_SUBMITTED', {
+        message: 'Prompt received! Analyzing request 👀',
+        priority: 50
+      });
+      return;
+    }
+
+    // 2. Antigravity thinking & planning
+    if (entry.type === 'PLANNER_RESPONSE') {
+      if (entry.thinking || (entry.content && !entry.tool_calls)) {
+        this.emit('THINKING', {
+          message: 'pondering solution...',
+          priority: 55
+        });
+      }
+
+      // 3. Coding & tool execution
+      if (Array.isArray(entry.tool_calls) && entry.tool_calls.length > 0) {
+        const hasCodeEdit = entry.tool_calls.some(
+          (t: any) => t.name === 'write_to_file' || t.name === 'replace_file_content' || t.name === 'multi_replace_file_content'
+        );
+        const hasCommand = entry.tool_calls.some((t: any) => t.name === 'run_command');
+
+        if (hasCodeEdit) {
+          this.emit('GENERATING', {
+            message: 'writing code... 🔥',
+            priority: 65
+          });
+        } else if (hasCommand) {
+          this.emit('COMMAND_RUNNING', {
+            message: 'executing command in shell...',
+            priority: 45
+          });
+        }
+      }
+      return;
+    }
+
+    // 4. Command exit & execution completion
+    if (entry.type === 'RUN_COMMAND' || entry.type === 'RUN_COMMAND_OUTPUT') {
+      if (entry.exit_code === 0) {
+        this.emit('BUILD_SUCCESS', {
+          message: 'task passed! ✨',
+          priority: 80
+        });
+      } else if (entry.exit_code && entry.exit_code !== 0) {
+        this.emit('BUILD_FAILED', {
+          message: 'command error detected 😭',
+          priority: 90
+        });
+      }
+      return;
+    }
+
+    // 5. Turn completed (Model finished work)
+    if (entry.status === 'DONE' && entry.source === 'MODEL' && !entry.tool_calls) {
+      this.emit('CODE_GENERATED', {
+        message: 'code complete! you cooked 🔥',
+        priority: 75
+      });
+    }
+  }
+
+  // Watch current workspace directory for file changes
+  private watchWorkspaceFiles() {
+    const cwd = process.cwd();
+    try {
+      this.workspaceWatcher = fs.watch(cwd, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        // Ignore build artifacts & git
+        if (
+          filename.includes('.git') ||
+          filename.includes('node_modules') ||
+          filename.includes('dist') ||
+          filename.includes('release') ||
+          filename.endsWith('.log')
+        ) {
+          return;
+        }
+
+        this.emit('CODE_EDITED', {
+          message: `Edited ${path.basename(filename)}`,
+          priority: 30
+        });
+      });
+    } catch (err) {
+      // Recursive watch might not be supported on all OS
+    }
+  }
+
+  public async stop(): Promise<void> {
+    this.isRunning = false;
+    if (this.fileWatcher) {
+      this.fileWatcher.close();
+      this.fileWatcher = null;
+    }
+    if (this.sessionScanInterval) {
+      clearInterval(this.sessionScanInterval);
+    }
+    if (this.workspaceWatcher) {
+      this.workspaceWatcher.close();
+      this.workspaceWatcher = null;
+    }
+  }
 }
 
 // Claude Code CLI Adapter
@@ -88,47 +335,20 @@ export class ClaudeCodeAdapter extends BaseToolAdapter {
   public async isAvailable(): Promise<boolean> {
     const home = os.homedir();
     const claudeDir = path.join(home, '.claude');
-    return fs.existsSync(claudeDir) || (await checkProcessRunning(['claude', 'claude-code']));
+    return fs.existsSync(claudeDir) || (await ProcessMonitorCache.isProcessRunning(['claude', 'claude-code']));
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
     this.pollInterval = setInterval(async () => {
-      const active = await checkProcessRunning(['claude', 'claude-code']);
+      const active = await ProcessMonitorCache.isProcessRunning(['claude', 'claude-code']);
       if (active && !this.lastState) {
         this.emit('TOOL_STARTED', { message: 'Claude Code launched in terminal' });
       } else if (!active && this.lastState) {
         this.emit('TOOL_IDLE', { message: 'Claude Code session completed' });
       }
       this.lastState = active;
-    }, 4000);
-  }
-
-  public async stop(): Promise<void> {
-    this.isRunning = false;
-    if (this.pollInterval) clearInterval(this.pollInterval);
-  }
-}
-
-// Codex / OpenAI Adapter
-export class CodexAdapter extends BaseToolAdapter {
-  public readonly id = 'codex';
-  public readonly name = 'Codex';
-  public readonly category = 'ai-cli' as const;
-  private pollInterval?: NodeJS.Timeout;
-
-  public async isAvailable(): Promise<boolean> {
-    return checkProcessRunning(['codex', 'openai']);
-  }
-
-  public async start(): Promise<void> {
-    this.isRunning = true;
-    this.pollInterval = setInterval(async () => {
-      const active = await checkProcessRunning(['codex', 'openai']);
-      if (active) {
-        this.emit('GENERATING', { message: 'Codex processing request' });
-      }
-    }, 6000);
+    }, 20000); // 20s interval for cool Mac
   }
 
   public async stop(): Promise<void> {
@@ -145,17 +365,14 @@ export class CursorAdapter extends BaseToolAdapter {
   private pollInterval?: NodeJS.Timeout;
 
   public async isAvailable(): Promise<boolean> {
-    return checkProcessRunning(['Cursor', 'cursor']);
+    return ProcessMonitorCache.isProcessRunning(['Cursor', 'cursor']);
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
     this.pollInterval = setInterval(async () => {
-      const active = await checkProcessRunning(['Cursor', 'cursor']);
-      if (active) {
-        // Active IDE detected
-      }
-    }, 5000);
+      await ProcessMonitorCache.isProcessRunning(['Cursor', 'cursor']);
+    }, 25000);
   }
 
   public async stop(): Promise<void> {
@@ -164,28 +381,22 @@ export class CursorAdapter extends BaseToolAdapter {
   }
 }
 
-// Antigravity Adapter
-export class AntigravityAdapter extends BaseToolAdapter {
-  public readonly id = 'antigravity';
-  public readonly name = 'Antigravity';
-  public readonly category = 'ide' as const;
+// Codex Adapter
+export class CodexAdapter extends BaseToolAdapter {
+  public readonly id = 'codex';
+  public readonly name = 'Codex';
+  public readonly category = 'ai-cli' as const;
   private pollInterval?: NodeJS.Timeout;
-  private watchedLogPath?: string;
 
   public async isAvailable(): Promise<boolean> {
-    const home = os.homedir();
-    const agyConfig = path.join(home, '.gemini/antigravity-ide');
-    return fs.existsSync(agyConfig) || (await checkProcessRunning(['Antigravity', 'antigravity', 'agy']));
+    return ProcessMonitorCache.isProcessRunning(['codex', 'openai']);
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
     this.pollInterval = setInterval(async () => {
-      const active = await checkProcessRunning(['Antigravity', 'antigravity', 'agy']);
-      if (active) {
-        // Can emit periodic active status if needed
-      }
-    }, 5000);
+      await ProcessMonitorCache.isProcessRunning(['codex', 'openai']);
+    }, 25000);
   }
 
   public async stop(): Promise<void> {
@@ -202,14 +413,14 @@ export class CopilotAdapter extends BaseToolAdapter {
   private pollInterval?: NodeJS.Timeout;
 
   public async isAvailable(): Promise<boolean> {
-    return checkProcessRunning(['copilot-agent', 'github-copilot']);
+    return ProcessMonitorCache.isProcessRunning(['copilot-agent', 'github-copilot']);
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
     this.pollInterval = setInterval(async () => {
-      await checkProcessRunning(['copilot-agent', 'github-copilot']);
-    }, 6000);
+      await ProcessMonitorCache.isProcessRunning(['copilot-agent', 'github-copilot']);
+    }, 25000);
   }
 
   public async stop(): Promise<void> {
@@ -226,14 +437,14 @@ export class WindsurfAdapter extends BaseToolAdapter {
   private pollInterval?: NodeJS.Timeout;
 
   public async isAvailable(): Promise<boolean> {
-    return checkProcessRunning(['Windsurf', 'windsurf']);
+    return ProcessMonitorCache.isProcessRunning(['Windsurf', 'windsurf']);
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
     this.pollInterval = setInterval(async () => {
-      await checkProcessRunning(['Windsurf', 'windsurf']);
-    }, 5000);
+      await ProcessMonitorCache.isProcessRunning(['Windsurf', 'windsurf']);
+    }, 25000);
   }
 
   public async stop(): Promise<void> {
@@ -242,56 +453,39 @@ export class WindsurfAdapter extends BaseToolAdapter {
   }
 }
 
-// Generic CLI & Build Watcher Adapter (Terminal commands, git, build runners)
+// Generic CLI & Build Watcher Adapter (Low-CPU Event-Driven)
 export class GenericCliAdapter extends BaseToolAdapter {
   public readonly id = 'generic-cli';
   public readonly name = 'Terminal & Build Watcher';
   public readonly category = 'generic' as const;
   private pollInterval?: NodeJS.Timeout;
-  private lastDetectedCommands: Set<string> = new Set();
 
   public async isAvailable(): Promise<boolean> {
-    return true; // Always available on any developer machine
+    return true;
   }
 
   public async start(): Promise<void> {
     this.isRunning = true;
-    const targets = ['npm', 'pnpm', 'yarn', 'cargo', 'pytest', 'vitest', 'go', 'git'];
+    const targets = ['pytest', 'vitest', 'cargo'];
 
     this.pollInterval = setInterval(async () => {
       for (const cmd of targets) {
-        const isRunning = await checkProcessRunning([cmd]);
-        if (isRunning && !this.lastDetectedCommands.has(cmd)) {
-          this.lastDetectedCommands.add(cmd);
-          if (cmd === 'pytest' || cmd === 'vitest') {
-            this.emit('TEST_STARTED', { message: `Running tests with ${cmd}` });
-          } else if (cmd === 'cargo' || cmd === 'npm') {
-            this.emit('BUILD_STARTED', { message: `Build initiated via ${cmd}` });
-          } else {
-            this.emit('COMMAND_RUNNING', { message: `Running ${cmd} in terminal` });
-          }
-        } else if (!isRunning && this.lastDetectedCommands.has(cmd)) {
-          this.lastDetectedCommands.delete(cmd);
-          if (cmd === 'pytest' || cmd === 'vitest') {
-            this.emit('TEST_PASSED', { message: `Tests finished on ${cmd}` });
-          } else if (cmd === 'cargo' || cmd === 'npm') {
-            this.emit('BUILD_SUCCESS', { message: `Build completed for ${cmd}` });
-          } else {
-            this.emit('COMMAND_COMPLETED', { message: `Completed ${cmd}` });
-          }
+        const isRunning = await ProcessMonitorCache.isProcessRunning([cmd]);
+        if (isRunning) {
+          this.emit('COMMAND_RUNNING', { message: `Running ${cmd}` });
+          break;
         }
       }
-    }, 2500);
+    }, 15000);
   }
 
   public async stop(): Promise<void> {
     this.isRunning = false;
     if (this.pollInterval) clearInterval(this.pollInterval);
-    this.lastDetectedCommands.clear();
   }
 }
 
-// Custom Tool Adapter configured by user
+// Custom Tool Adapter
 export class CustomToolAdapter extends BaseToolAdapter {
   public readonly id: string;
   public readonly name: string;
@@ -311,7 +505,7 @@ export class CustomToolAdapter extends BaseToolAdapter {
       return true;
     }
     if (this.config.detectionCommand) {
-      return checkProcessRunning([this.config.detectionCommand]);
+      return ProcessMonitorCache.isProcessRunning([this.config.detectionCommand]);
     }
     return false;
   }
@@ -321,11 +515,11 @@ export class CustomToolAdapter extends BaseToolAdapter {
     this.isRunning = true;
     if (this.config.detectionCommand) {
       this.pollInterval = setInterval(async () => {
-        const active = await checkProcessRunning([this.config.detectionCommand!]);
+        const active = await ProcessMonitorCache.isProcessRunning([this.config.detectionCommand!]);
         if (active) {
           this.emit('COMMAND_RUNNING', { message: `${this.name} active` });
         }
-      }, 5000);
+      }, 20000);
     }
   }
 
@@ -335,7 +529,7 @@ export class CustomToolAdapter extends BaseToolAdapter {
   }
 }
 
-// Local Webhook & CLI IPC Server (Allows curl / scripts / CLI to emit events: http://127.0.0.1:41738/event)
+// Local Webhook & CLI IPC Server (Allows curl/scripts/CLI: http://127.0.0.1:41738/event)
 export class LocalWebhookAdapter extends BaseToolAdapter {
   public readonly id = 'local-webhook';
   public readonly name = 'CodePet Event Hook Server';
@@ -351,7 +545,6 @@ export class LocalWebhookAdapter extends BaseToolAdapter {
     if (this.server) return;
 
     this.server = http.createServer((req, res) => {
-      // Set CORS for local development
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -378,7 +571,6 @@ export class LocalWebhookAdapter extends BaseToolAdapter {
           try {
             const data = JSON.parse(body);
             const eventType: CodingEventType = data.type || data.event || 'MANUAL_INTERACTION';
-            const tool = data.tool || 'generic-cli';
             const message = data.message;
             const eventData = data.data;
 
@@ -408,7 +600,7 @@ export class LocalWebhookAdapter extends BaseToolAdapter {
       });
 
       this.server?.on('error', err => {
-        console.warn('CodePet Local Webhook port in use or error:', err.message);
+        console.warn('CodePet Local Webhook port error:', err.message);
         resolve();
       });
     });
@@ -423,16 +615,16 @@ export class LocalWebhookAdapter extends BaseToolAdapter {
   }
 }
 
-// Tool Adapter Manager orchestrating all adapters
+// Tool Adapter Manager
 export class ToolAdapterManager {
   private adapters: Map<string, BaseToolAdapter> = new Map();
   private emitCallback?: EventEmitCallback;
 
   constructor() {
-    this.registerAdapter(new ClaudeCodeAdapter());
-    this.registerAdapter(new CodexAdapter());
-    this.registerAdapter(new CursorAdapter());
     this.registerAdapter(new AntigravityAdapter());
+    this.registerAdapter(new ClaudeCodeAdapter());
+    this.registerAdapter(new CursorAdapter());
+    this.registerAdapter(new CodexAdapter());
     this.registerAdapter(new CopilotAdapter());
     this.registerAdapter(new WindsurfAdapter());
     this.registerAdapter(new GenericCliAdapter());
@@ -461,12 +653,15 @@ export class ToolAdapterManager {
   }
 
   public async startEnabledAdapters(enabledToolIds: string[]): Promise<void> {
-    // Always start LocalWebhookAdapter so CLI emit works
+    // Always start Antigravity and LocalWebhook
     const webhook = this.adapters.get('local-webhook');
     if (webhook) await webhook.start();
 
+    const agy = this.adapters.get('antigravity');
+    if (agy) await agy.start();
+
     for (const [id, adapter] of this.adapters.entries()) {
-      if (id === 'local-webhook') continue;
+      if (id === 'local-webhook' || id === 'antigravity') continue;
       if (enabledToolIds.includes(id)) {
         await adapter.start();
       } else {
