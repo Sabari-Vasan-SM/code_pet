@@ -54,6 +54,7 @@ export class MoodEngine {
 
       case 'BUILD_SUCCESS':
       case 'TEST_PASSED':
+      case 'CODE_GENERATED':
         this.consecutiveFailures = 0;
         this.consecutiveSuccesses++;
         if (this.consecutiveSuccesses >= 3) {
@@ -229,20 +230,27 @@ export class PetStateMachine {
 
       case 'GENERATING':
         nextState = 'CODING';
-        durationMs = 3500;
+        durationMs = 2500;
         sound = 'typing';
+        break;
+
+      case 'CODE_GENERATED':
+        nextState = 'CELEBRATING';
+        durationMs = 1800;
+        particle = 'sparkles';
+        sound = 'celebrate';
         break;
 
       case 'PROMPT_SUBMITTED':
         nextState = 'EXCITED';
-        durationMs = 2500;
+        durationMs = 2000;
         sound = 'prompt_submit';
         break;
 
       case 'PROMPT_TYPED':
       case 'CODE_EDITED':
-        nextState = 'CODING';
-        durationMs = 2000;
+        nextState = 'HAPPY';
+        durationMs = 1200;
         break;
 
       case 'MANUAL_INTERACTION':

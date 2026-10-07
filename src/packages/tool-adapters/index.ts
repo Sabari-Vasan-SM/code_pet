@@ -100,10 +100,10 @@ export class AntigravityAdapter extends BaseToolAdapter {
 
   private activeTranscriptPath: string | null = null;
   private fileWatcher: fs.FSWatcher | null = null;
-  private brainWatcher: fs.FSWatcher | null = null;
   private lastFileOffset: number = 0;
   private sessionScanInterval?: NodeJS.Timeout;
-  private workspaceWatcher: fs.FSWatcher | null = null;
+  private codingSafetyTimeout?: NodeJS.Timeout;
+  private isCurrentlyTyping: boolean = false;
 
   public async isAvailable(): Promise<boolean> {
     const home = os.homedir();
@@ -119,9 +119,6 @@ export class AntigravityAdapter extends BaseToolAdapter {
     this.sessionScanInterval = setInterval(() => {
       this.findAndWatchActiveTranscript();
     }, 30000);
-
-    // Also watch current workspace directory for live file edits
-    this.watchWorkspaceFiles();
   }
 
   private findAndWatchActiveTranscript() {
@@ -160,7 +157,7 @@ export class AntigravityAdapter extends BaseToolAdapter {
 
     this.activeTranscriptPath = logPath;
     try {
-      // Start reading from current end of file
+      // Start reading from current end of file so we don't replay old history
       const stats = fs.statSync(logPath);
       this.lastFileOffset = stats.size;
 
@@ -216,8 +213,11 @@ export class AntigravityAdapter extends BaseToolAdapter {
   }
 
   private handleTranscriptEntry(entry: any) {
+    if (!entry) return;
+
     // 1. User prompt submitted
     if (entry.type === 'USER_INPUT') {
+      this.clearTypingState();
       this.emit('PROMPT_SUBMITTED', {
         message: 'Prompt received! Analyzing request 👀',
         priority: 50
@@ -225,39 +225,109 @@ export class AntigravityAdapter extends BaseToolAdapter {
       return;
     }
 
-    // 2. Antigravity thinking & planning
+    // 2. Antigravity Planner Response
     if (entry.type === 'PLANNER_RESPONSE') {
-      if (entry.thinking || (entry.content && !entry.tool_calls)) {
+      const toolCalls = Array.isArray(entry.tool_calls) ? entry.tool_calls : [];
+
+      if (toolCalls.length > 0) {
+        const hasCodeEdit = toolCalls.some(
+          (t: any) =>
+            t.name === 'write_to_file' ||
+            t.name === 'replace_file_content' ||
+            t.name === 'multi_replace_file_content'
+        );
+        const hasCommand = toolCalls.some((t: any) => t.name === 'run_command');
+        const hasInspection = toolCalls.some((t: any) =>
+          ['view_file', 'grep_search', 'list_dir', 'search_web', 'read_url_content'].includes(t.name)
+        );
+
+        if (hasCodeEdit) {
+          this.isCurrentlyTyping = true;
+          if (this.codingSafetyTimeout) clearTimeout(this.codingSafetyTimeout);
+          this.codingSafetyTimeout = setTimeout(() => {
+            if (this.isCurrentlyTyping) {
+              this.isCurrentlyTyping = false;
+              this.emit('TOOL_IDLE');
+            }
+          }, 3000);
+
+          this.emit('GENERATING', {
+            message: 'writing code... 💻',
+            priority: 65
+          });
+        } else if (hasCommand) {
+          this.clearTypingState();
+          this.emit('COMMAND_RUNNING', {
+            message: 'executing command... ⚙️',
+            priority: 45
+          });
+        } else if (hasInspection) {
+          this.clearTypingState();
+          this.emit('THINKING', {
+            message: 'inspecting files... 🔍',
+            priority: 55
+          });
+        } else {
+          this.clearTypingState();
+          this.emit('THINKING', {
+            message: 'pondering solution...',
+            priority: 50
+          });
+        }
+        return;
+      }
+
+      // No tool calls: model turn completed or formulating final text
+      if (entry.status === 'DONE') {
+        const wasTyping = this.isCurrentlyTyping;
+        this.clearTypingState();
+
+        if (wasTyping) {
+          this.emit('CODE_GENERATED', {
+            message: 'code complete! you cooked 🔥',
+            priority: 75
+          });
+        } else {
+          this.emit('TOOL_IDLE', {
+            message: 'ready for next task! 🐾',
+            priority: 40
+          });
+        }
+        return;
+      }
+
+      if (entry.thinking) {
+        this.clearTypingState();
         this.emit('THINKING', {
           message: 'pondering solution...',
           priority: 55
         });
+        return;
       }
 
-      // 3. Coding & tool execution
-      if (Array.isArray(entry.tool_calls) && entry.tool_calls.length > 0) {
-        const hasCodeEdit = entry.tool_calls.some(
-          (t: any) => t.name === 'write_to_file' || t.name === 'replace_file_content' || t.name === 'multi_replace_file_content'
-        );
-        const hasCommand = entry.tool_calls.some((t: any) => t.name === 'run_command');
+      return;
+    }
 
-        if (hasCodeEdit) {
-          this.emit('GENERATING', {
-            message: 'writing code... 🔥',
-            priority: 65
-          });
-        } else if (hasCommand) {
-          this.emit('COMMAND_RUNNING', {
-            message: 'executing command in shell...',
-            priority: 45
-          });
-        }
+    // 3. Tool execution completion events
+    if (
+      entry.type === 'CODE_ACTION' ||
+      entry.type === 'WRITE_TO_FILE' ||
+      entry.type === 'REPLACE_FILE_CONTENT' ||
+      entry.type === 'MULTI_REPLACE_FILE_CONTENT'
+    ) {
+      if (entry.status === 'DONE') {
+        this.clearTypingState();
+        this.emit('CODE_GENERATED', {
+          message: 'file updated! ✨',
+          priority: 75
+        });
       }
       return;
     }
 
     // 4. Command exit & execution completion
     if (entry.type === 'RUN_COMMAND' || entry.type === 'RUN_COMMAND_OUTPUT') {
+      this.clearTypingState();
       if (entry.exit_code === 0) {
         this.emit('BUILD_SUCCESS', {
           message: 'task passed! ✨',
@@ -268,43 +338,26 @@ export class AntigravityAdapter extends BaseToolAdapter {
           message: 'command error detected 😭',
           priority: 90
         });
+      } else {
+        this.emit('TOOL_IDLE');
       }
       return;
     }
 
-    // 5. Turn completed (Model finished work)
-    if (entry.status === 'DONE' && entry.source === 'MODEL' && !entry.tool_calls) {
-      this.emit('CODE_GENERATED', {
-        message: 'code complete! you cooked 🔥',
-        priority: 75
-      });
+    // 5. Inspection completion
+    if (entry.type === 'VIEW_FILE' || entry.type === 'LIST_DIRECTORY') {
+      if (entry.status === 'DONE') {
+        this.clearTypingState();
+      }
+      return;
     }
   }
 
-  // Watch current workspace directory for file changes
-  private watchWorkspaceFiles() {
-    const cwd = process.cwd();
-    try {
-      this.workspaceWatcher = fs.watch(cwd, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-        // Ignore build artifacts & git
-        if (
-          filename.includes('.git') ||
-          filename.includes('node_modules') ||
-          filename.includes('dist') ||
-          filename.includes('release') ||
-          filename.endsWith('.log')
-        ) {
-          return;
-        }
-
-        this.emit('CODE_EDITED', {
-          message: `Edited ${path.basename(filename)}`,
-          priority: 30
-        });
-      });
-    } catch (err) {
-      // Recursive watch might not be supported on all OS
+  private clearTypingState() {
+    this.isCurrentlyTyping = false;
+    if (this.codingSafetyTimeout) {
+      clearTimeout(this.codingSafetyTimeout);
+      this.codingSafetyTimeout = undefined;
     }
   }
 
@@ -316,11 +369,9 @@ export class AntigravityAdapter extends BaseToolAdapter {
     }
     if (this.sessionScanInterval) {
       clearInterval(this.sessionScanInterval);
+      this.sessionScanInterval = undefined;
     }
-    if (this.workspaceWatcher) {
-      this.workspaceWatcher.close();
-      this.workspaceWatcher = null;
-    }
+    this.clearTypingState();
   }
 }
 
