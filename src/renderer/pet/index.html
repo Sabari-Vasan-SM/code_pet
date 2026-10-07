@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CodePet Overlay</title>
+  <link rel="stylesheet" href="./pet.css">
+</head>
+<body>
+  <div id="pet-root" class="pet-root">
+    <!-- Contextual Speech Bubble -->
+    <div id="speech-bubble" class="speech-bubble hidden">
+      <div id="speech-text" class="speech-text">hello dev!</div>
+      <div class="speech-tail"></div>
+    </div>
+
+    <!-- Particle Layer -->
+    <canvas id="particle-canvas" class="particle-canvas" width="240" height="220"></canvas>
+
+    <!-- Interactive Pet Canvas -->
+    <div id="pet-container" class="pet-container">
+      <canvas id="pet-canvas" class="pet-canvas" width="96" height="96"></canvas>
+    </div>
+
+    <!-- Custom Right Click Menu -->
+    <div id="context-menu" class="context-menu hidden">
+      <div class="menu-item" data-action="pet">❤️ Pet</div>
+      <div class="menu-item" data-action="feed">🐟 Feed Snack</div>
+      <div class="menu-item" data-action="play">🎾 Play</div>
+      <div class="menu-item" data-action="dance">💃 Dance</div>
+      <div class="menu-item" data-action="sleep">💤 Sleep</div>
+      <div class="menu-item" data-action="wake">⚡ Wake Up</div>
+      <div class="menu-separator"></div>
+      <div class="menu-item" data-action="settings">⚙️ Settings</div>
+      <div class="menu-item" data-action="hide">👁️ Hide Pet</div>
+    </div>
+  </div>
+
+  <script type="module" src="./pet.ts"></script>
+</body>
+</html>
