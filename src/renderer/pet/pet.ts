@@ -128,7 +128,7 @@ class DesktopPetController {
 
   private updateScale() {
     const scale = this.config.appearance.pixelScale || 4;
-    const size = 24 * scale;
+    const size = 32 * scale;
     this.petCanvas.width = size;
     this.petCanvas.height = size;
   }

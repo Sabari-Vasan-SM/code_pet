@@ -55,6 +55,9 @@ export type PetSpecies =
   | 'penguin'
   | 'robot'
   | 'ghost'
+  | 'dino'
+  | 'parrot'
+  | 'snake'
   | 'custom';
 
 export type PetAnimationState =

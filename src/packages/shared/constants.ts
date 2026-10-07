@@ -198,6 +198,24 @@ export const PET_SPECIES_META = [
     trait: 'Hovers silently, phase shifts when syntax errors vanish.'
   },
   {
+    id: 'dino',
+    name: 'Emerald Dino',
+    description: 'Mini prehistoric coder, wags heavy tail and roars tiny cheers on green tests.',
+    trait: 'Raptor roar on build pass, coils tail when snoozing.'
+  },
+  {
+    id: 'parrot',
+    name: 'Tropical Parrot',
+    description: 'Vibrant plumage, bobs head to keyboard rhythms and chirps on AI responses.',
+    trait: 'Flaps wings in celebration, cocks head when reviewing code.'
+  },
+  {
+    id: 'snake',
+    name: 'Python Snake',
+    description: 'Sleek, glossy green serpent that rests peacefully on your desktop.',
+    trait: 'Tongue flick on prompt receive, coils into a spiral when sleeping.'
+  },
+  {
     id: 'custom',
     name: 'Custom Pet',
     description: 'Customizable pixel sprite with customizable palette.',

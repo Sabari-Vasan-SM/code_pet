@@ -85,8 +85,8 @@ function PetPreviewCanvas({
     <canvas
       ref={canvasRef}
       className="preview-canvas"
-      width={24 * scale}
-      height={24 * scale}
+      width={32 * scale}
+      height={32 * scale}
     />
   );
 }
@@ -828,16 +828,16 @@ export default function App() {
                 <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '16px' }}>
                   Select the character that will accompany your developer journey.
                 </p>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '20px' }}>
-                  {PET_SPECIES_META.slice(0, 6).map(meta => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', maxHeight: '280px', overflowY: 'auto', marginBottom: '20px', paddingRight: '4px' }}>
+                  {PET_SPECIES_META.map(meta => (
                     <div
                       key={meta.id}
                       className={`tool-select-card ${config.pet.species === meta.id ? 'selected' : ''}`}
                       onClick={() => setConfig({ ...config, pet: { ...config.pet, species: meta.id as any } })}
-                      style={{ flexDirection: 'column', padding: '16px 8px', textAlign: 'center' }}
+                      style={{ flexDirection: 'column', padding: '12px 6px', textAlign: 'center' }}
                     >
-                      <PetPreviewCanvas species={meta.id as any} skin="default" accessory="none" scale={3} />
-                      <span style={{ fontSize: '12px', fontWeight: 600, marginTop: '8px' }}>{meta.name}</span>
+                      <PetPreviewCanvas species={meta.id as any} skin="default" accessory="none" scale={2} />
+                      <span style={{ fontSize: '11px', fontWeight: 600, marginTop: '6px' }}>{meta.name}</span>
                     </div>
                   ))}
                 </div>
